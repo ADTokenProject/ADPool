@@ -7,8 +7,6 @@ import "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/math/SafeMath.sol";
 
-import '@uniswap/v2-periphery/contracts/interfaces/IUniswapV2Router02.sol';
-
 
 // Have fun reading it. Hopefully it's bug-free. God bless.
 contract ADPool is Ownable {
@@ -61,8 +59,6 @@ contract ADPool is Ownable {
         uint256 endTime;
     }
 
-    IUniswapV2Router02 uniswapV2Router02;
-    IERC20 BUSD;
     // The AD TOKEN
     IERC20 public adToken;
     //Total bonus for all mine pools (unchanged)
@@ -76,7 +72,7 @@ contract ADPool is Ownable {
     //The default base of the unlock multiple is 1
     uint public unlockMultiple;
 
-    uint256 public stakingThresholdUSD;//Pledge the AD threshold. LP can be pledged only when the threshold is exceeded
+    uint256 public stakingThreshold;//Pledge the AD threshold. LP can be pledged only when the threshold is exceeded
     uint256 public stakingAmountSupply;//The Ad deposit supply pledged changes when the user pledges the Ad or withdraws
 
     uint public referrerRewardPercent;//Referral bonus percentage
@@ -93,14 +89,19 @@ contract ADPool is Ownable {
     event Withdraw(address indexed user, uint256 indexed pid, uint256 amount);
     event UnlockReward(address indexed user, uint256 amount, uint256 depositAmount);
     event ExtractAD(address indexed user, uint256 amount);
-
+    event Init(uint256 rewardAmountTotal, uint256 adPerBlock, uint256 stakingThreshold, uint unlockMultiple, uint referrerRewardPercent);
+    event AddRewardAmount(uint256 amount);
+    event AddPool(address indexed lpToken, uint256 allocPoint);
+    event SetAllocPoint(uint256 pid, uint256 allocPoint);
+    event SetUnlockMultiple(uint unlockMultiple);
+    event SetAdPerBlock(uint256 adPerBlock);
+    event SetStakingThreshold(uint256 stakingThreshold);
+    event SetReferrerRewardPercent(uint referrerRewardPercent);
 
     //Constructor to pass in some contract addresses
-    constructor(address _adToken, address _uniswapV2Router02, address _busd) public {
-        require(_adToken != address(0) && _uniswapV2Router02 != address(0) && _busd != address(0), "Error: address null");
+    constructor(address _adToken) public {
+        require(_adToken != address(0), "Error: address null");
         adToken = IERC20(_adToken);
-        uniswapV2Router02 = IUniswapV2Router02(_uniswapV2Router02);
-        BUSD = IERC20(_busd);
     }
 
     //Deposit pledge: Deposit in AD or LP for AD reward
@@ -113,7 +114,7 @@ contract ADPool is Ownable {
         require(pool.allocPoint > 0, "Error: The bonus allocation point is 0 and cannot be pledged");
 
         //If LP is used, the AD saved by the user must be greater than or equal to the limit
-        require(_pid != 0 ? userInfo[0][msg.sender].amount >= getStakingThresholdAD() : true, "ADPool: Wrong you must pledge enough AD to pledge LP");
+        require(_pid != 0 ? userInfo[0][msg.sender].amount >= stakingThreshold : true, "ADPool: Wrong you must pledge enough AD to pledge LP");
 
         updatePool(_pid);
 
@@ -163,7 +164,7 @@ contract ADPool is Ownable {
 
         require(user.amount >= _amount, "withdraw: not good");
         //If the AD mining pool is selected, the amount after withdrawal is less than the threshold value, it is necessary to determine whether LP is pledged, if so, the withdrawal cannot be made
-        if (_pid == 0 && user.amount.sub(_amount) < getStakingThresholdAD()) {
+        if (_pid == 0 && user.amount.sub(_amount) < stakingThreshold) {
             require(!isHasDepositLP(msg.sender), "Error: you still have LP under pledge, can't take so much AD");
         }
         updatePool(_pid);
@@ -290,7 +291,7 @@ contract ADPool is Ownable {
         uint256 tempAmount = _amount;
 
         for (uint i = 0; i < reward.rewardUnlocks.length; i++) {
-            if (block.timestamp >= reward.rewardUnlocks[i].endTime && reward.rewardUnlocks[i].totalAmount > 0) {
+            if (block.timestamp >= reward.rewardUnlocks[i].endTime && reward.rewardUnlocks[i].extractTotalAmount > 0) {
 
                 //The amount of the unlock list is sufficient
                 if (reward.rewardUnlocks[i].extractTotalAmount >= tempAmount) {
@@ -326,9 +327,8 @@ contract ADPool is Ownable {
         return poolInfo.length;
     }
 
-    /**
-    * Update reward variables for all pools. Be careful of gas spending!
-    */
+
+    //Update reward variables for all pools. Be careful of gas spending!
     function massUpdatePools() public {
         uint256 length = poolInfo.length;
         for (uint256 pid = 0; pid < length; ++pid) {
@@ -358,11 +358,11 @@ contract ADPool is Ownable {
     }
 
     //Initialize the
-    function init(uint256 _rewardAmountTotal, uint256 _adPerBlock, uint256 _stakingThresholdUSD, uint _unlockMultiple, uint _referrerRewardPercent) public onlyOwner {
+    function init(uint256 _rewardAmountTotal, uint256 _adPerBlock, uint256 _stakingThreshold, uint _unlockMultiple, uint _referrerRewardPercent) public onlyOwner {
 
         require(rewardAmountTotal == 0, "Error: Do not repeat the initial contract");
 
-        require(_rewardAmountTotal > 0 && _adPerBlock > 0 && _stakingThresholdUSD > 0 && _unlockMultiple > 0 && _referrerRewardPercent > 0,"Error: Parameter is not correct");
+        require(_rewardAmountTotal > 0 && _adPerBlock > 0 && _stakingThreshold > 0 && _unlockMultiple > 0 && _referrerRewardPercent > 0, "Error: Parameter is not correct");
 
         adToken.safeTransferFrom(address(msg.sender), address(this), _rewardAmountTotal);
 
@@ -370,12 +370,14 @@ contract ADPool is Ownable {
         rewardAmountRemaining = _rewardAmountTotal;
         adPerBlock = _adPerBlock;
 
-        stakingThresholdUSD = _stakingThresholdUSD;
+        stakingThreshold = _stakingThreshold;
         unlockMultiple = _unlockMultiple;
         referrerRewardPercent = _referrerRewardPercent;
 
         // staking pool
         addPool(adToken, 0, false);
+
+        emit Init(_rewardAmountTotal, _adPerBlock, _stakingThreshold, _unlockMultiple, _referrerRewardPercent);
     }
 
     //Add mine pool bonus, be sure to approve enough AD amount before adding
@@ -383,6 +385,8 @@ contract ADPool is Ownable {
         adToken.safeTransferFrom(address(msg.sender), address(this), _amount);
         rewardAmountTotal = rewardAmountTotal.add(_amount);
         rewardAmountRemaining = rewardAmountRemaining.add(_amount);
+
+        emit AddRewardAmount(_amount);
     }
 
     //Add a new LP mining pool to the pool, which can only be called by the holder
@@ -403,6 +407,8 @@ contract ADPool is Ownable {
         accAdPerShare : 0
         })
         );
+
+        emit AddPool(address(_lpToken), _allocPoint);
     }
 
     //Sets the AD allocation point for the specified pool
@@ -412,11 +418,15 @@ contract ADPool is Ownable {
         }
         totalAllocPoint = totalAllocPoint.sub(poolInfo[_pid].allocPoint).add(_allocPoint);
         poolInfo[_pid].allocPoint = _allocPoint;
+
+        emit SetAllocPoint(_pid, _allocPoint);
     }
 
     //Set unlock deposit multiple
     function setUnlockMultiple(uint _unlockMultiple) public onlyOwner {
         unlockMultiple = _unlockMultiple;
+
+        emit SetUnlockMultiple(_unlockMultiple);
     }
 
     //Set the mining amount of each block
@@ -425,34 +435,22 @@ contract ADPool is Ownable {
             massUpdatePools();
         }
         adPerBlock = _adPerBlock;
+
+        emit SetAdPerBlock(_adPerBlock);
     }
 
     //Set AD pledge amount limit
-    function setStakingThresholdUSD(uint256 _stakingThresholdUSD) public onlyOwner {
-        stakingThresholdUSD = _stakingThresholdUSD;
+    function setStakingThreshold(uint256 _stakingThreshold) public onlyOwner {
+        stakingThreshold = _stakingThreshold;
+
+        emit SetStakingThreshold(_stakingThreshold);
     }
 
     //Set a percentage of the referrer's reward
     function setReferrerRewardPercent(uint _referrerRewardPercent) public onlyOwner {
-        require(_referrerRewardPercent >= 0, "Error: cannot be less than 0");
         referrerRewardPercent = _referrerRewardPercent;
-    }
 
-
-    //Get token unit price, return 1 token can be exchanged for n quotetokens at most
-    function getTokenPrice(address token, address quoteToken) view public returns (uint){
-        address[] memory path = new address[](2);
-        path[0] = token;
-        path[1] = quoteToken;
-        uint[] memory amounts = uniswapV2Router02.getAmountsOut(1 * 1e18, path);
-        return amounts[1];
-    }
-
-
-    /// Get the AD amount converted from threshold USD
-    function getStakingThresholdAD() view public returns (uint256 amount){
-        uint adPrice = getTokenPrice(address(adToken), address(BUSD));
-        amount = stakingThresholdUSD.mul(1e18).div(adPrice);
+        emit SetReferrerRewardPercent(_referrerRewardPercent);
     }
 
     // Secure AD transfer in case there is not enough AD in the pool due to rounding errors.
